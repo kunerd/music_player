@@ -1,12 +1,19 @@
+use std::fs::File;
+use std::io::BufReader;
+use std::mem;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
+
 
 use iced::widget::{button, center, column, container, keyed_column, row, text};
 use iced::Length::Fill;
 use iced::{window, Element, Task};
 use lofty::file::AudioFile;
 use lofty::probe::Probe;
+use rodio::{OutputStream, Sink, Source};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use uuid::Uuid;
 
 mod track;
@@ -19,7 +26,6 @@ fn main() -> iced::Result {
     let path = PathBuf::from_str(HOME_PATH).unwrap();
 
     if !path.exists() {
-        println!("{path:#?}");
         std::fs::create_dir(path).unwrap();
     }
 
@@ -32,10 +38,12 @@ fn main() -> iced::Result {
 
 struct Player {
     tracks: Vec<Track>,
+    sender: Sender<Command>
 }
 
+#[derive(Debug, Clone, PartialEq)]
 enum Command {
-    Play,
+    Play(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -47,10 +55,40 @@ enum Message {
 
 impl Player {
     fn new() -> (Self, Task<Message>) {
-        let player = Player {
-                tracks: vec![],
-        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<Command>(100);
         
+        let (_stream, stream_handle) = OutputStream::try_default().unwrap();
+        let sink = Sink::try_new(&stream_handle).unwrap();
+
+        rt.spawn(async move {
+            while let Some(command)  = rx.recv().await {
+                match command.clone() {
+                    Command::Play(path) => {
+                        let file = File::open(path).unwrap();
+                        let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
+                        let dur = source.total_duration();
+                        println!("Total duration = {dur:#?}");
+                        sink.stop();
+                        sink.append(source);
+                    },
+                };
+
+                // Need to sleep because it can't update sink.len()
+                // before executing println, so there will be old info
+                std::thread::sleep(Duration::from_millis(50));
+                println!("Currently tracks in queue = {}", sink.len());
+                println!("Track is on position = {:?} s", sink.get_pos());
+            }
+        });
+
+        mem::forget(rt);
+        
+        let player = Player {
+            tracks: vec![],
+            sender: tx,
+        };
         (
             player,
             Task::perform(SavedState::load(), Message::Loaded),
@@ -72,13 +110,25 @@ impl Player {
 
                 Task::none()
             }
-            Message::Loaded(Err(err)) => Task::none(),
+            Message::Loaded(Err(_err)) => Task::none(),
             Message::TrackMessage(i, track_message) => {
                 if let Some(track) = self.tracks.get_mut(i) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    println!("{i}");
                     let _a = track.update(track_message);
                     let path = track.path.clone();
+                    let sender = self.sender.clone();
 
-                    Task::none()
+                    let a = tokio::spawn(async move {
+                        let a = sender.send(Command::Play(path)).await;
+                        if a.is_err() {
+                            println!("{}", a.unwrap_err().to_string());
+                        }
+                    });
+
+                    mem::forget(a);
+
+                Task::none()
                 } else {
                     Task::none()
                 }

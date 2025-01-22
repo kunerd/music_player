@@ -1,11 +1,9 @@
-use std::{path::{Path, PathBuf}, sync::{Arc, Mutex}};
+use std::path::{Path, PathBuf};
 
 use iced::{widget::{button, row, text}, Element, Length, Task};
-use rodio::{OutputStreamHandle, Sink};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::Player;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
@@ -30,7 +28,7 @@ impl Track {
                 println!("{path:#?}");
                 Task::none()
             },
-            TrackMessage::TrackEnd(res) => {
+            TrackMessage::TrackEnd(_res) => {
                 Task::none()
             }
         }
@@ -38,8 +36,6 @@ impl Track {
 
     pub fn view(&self) -> Element<TrackMessage> {
         let _path = Path::to_str(&self.path).unwrap();
-        let a = self.path.clone();
-        let a = a.as_path();
 
         let name = text(&self.name).width(Length::FillPortion(2));
         let duration = text(&self.duration).width(Length::FillPortion(1));

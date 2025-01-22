@@ -3,8 +3,8 @@ use std::io::BufReader;
 use std::mem;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::mpsc;
 use std::time::Duration;
-
 
 use iced::widget::{button, center, column, container, keyed_column, row, text};
 use iced::Length::Fill;
@@ -13,13 +13,12 @@ use lofty::file::AudioFile;
 use lofty::probe::Probe;
 use rodio::{OutputStream, Sink, Source};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{self, Receiver, Sender};
 use uuid::Uuid;
 
 mod track;
 use crate::track::*;
 
-pub const HOME_PATH: &str = "/home/lf/Music";
+pub const HOME_PATH: &str = FIXME;
 
 fn main() -> iced::Result {
     // Make config with its config file
@@ -38,7 +37,7 @@ fn main() -> iced::Result {
 
 struct Player {
     tracks: Vec<Track>,
-    sender: Sender<Command>
+    sender: mpsc::Sender<Command>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,49 +49,40 @@ enum Command {
 enum Message {
     Loaded(Result<Vec<Track>, LoadError>),
     TrackMessage(usize, TrackMessage),
-    Err(Result<(), String>)
+    Err(Result<(), String>),
 }
 
 impl Player {
     fn new() -> (Self, Task<Message>) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (tx, rx) = mpsc::channel::<Command>();
 
-        let (tx, mut rx) = mpsc::channel::<Command>(100);
-        
-        let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-        let sink = Sink::try_new(&stream_handle).unwrap();
+        tokio::task::spawn_blocking(move || {
+            let (_stream, stream_handle) = OutputStream::try_default().unwrap();
+            let sink = Sink::try_new(&stream_handle).unwrap();
 
-        rt.spawn(async move {
-            while let Some(command)  = rx.recv().await {
+            while let Ok(command) = rx.recv() {
                 match command.clone() {
                     Command::Play(path) => {
                         let file = File::open(path).unwrap();
-                        let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
+                        let source = rodio::Decoder::new_mp3(BufReader::new(file)).unwrap();
                         let dur = source.total_duration();
                         println!("Total duration = {dur:#?}");
-                        sink.stop();
                         sink.append(source);
-                    },
+                    }
                 };
 
-                // Need to sleep because it can't update sink.len()
-                // before executing println, so there will be old info
-                std::thread::sleep(Duration::from_millis(50));
                 println!("Currently tracks in queue = {}", sink.len());
                 println!("Track is on position = {:?} s", sink.get_pos());
             }
+
+            dbg!("Engine died");
         });
 
-        mem::forget(rt);
-        
         let player = Player {
             tracks: vec![],
             sender: tx,
         };
-        (
-            player,
-            Task::perform(SavedState::load(), Message::Loaded),
-        )
+        (player, Task::perform(SavedState::load(), Message::Loaded))
     }
 
     fn title(&self) -> String {
@@ -113,31 +103,26 @@ impl Player {
             Message::Loaded(Err(_err)) => Task::none(),
             Message::TrackMessage(i, track_message) => {
                 if let Some(track) = self.tracks.get_mut(i) {
-                    std::thread::sleep(Duration::from_millis(50));
-                    println!("{i}");
+                    dbg!(i, &track_message);
                     let _a = track.update(track_message);
                     let path = track.path.clone();
                     let sender = self.sender.clone();
 
-                    let a = tokio::spawn(async move {
-                        let a = sender.send(Command::Play(path)).await;
-                        if a.is_err() {
-                            println!("{}", a.unwrap_err().to_string());
-                        }
-                    });
-
-                    mem::forget(a);
-
-                Task::none()
+                    Task::perform(
+                        async move {
+                            let _ = sender.send(Command::Play(path));
+                        },
+                        |_| (),
+                    )
+                    .discard()
                 } else {
                     Task::none()
                 }
-            },
+            }
             Message::Err(res) => {
                 println!("{res:#?}");
                 Task::none()
             }
-
         }
     }
 
@@ -162,7 +147,8 @@ impl Player {
                 .into()
         };
 
-        let control = container(row![button("<"), button("||"), button(">")].spacing(50)).center_x(Fill);
+        let control =
+            container(row![button("<"), button("||"), button(">")].spacing(50)).center_x(Fill);
         let content = column![tracks, control].padding([10, 20]);
         container(content).width(Fill).height(Fill).into()
     }
@@ -206,7 +192,7 @@ impl SavedState {
             });
         }
 
-        return Ok(tracks);
+        Ok(tracks)
     }
 
     fn visit_dir(paths: &mut Vec<PathBuf>, dir: PathBuf) {
